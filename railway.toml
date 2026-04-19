@@ -1,0 +1,10 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+# This is a worker service (no HTTP port).  Railway restarts the
+# process on failure; the AIS worker itself handles WebSocket
+# reconnects with exponential backoff.
+startCommand = "python main.py"
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
