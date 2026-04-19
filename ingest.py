@@ -79,7 +79,7 @@ def _parse_timestamp(raw: Optional[str]) -> Optional[datetime]:
 
 def _mmsi(msg: dict[str, Any]) -> Optional[int]:
     """Pull MMSI from either the Metadata block or the inner Message."""
-    meta = msg.get("Metadata") or {}
+    meta = msg.get("MetaData") or {}
     mmsi = meta.get("MMSI")
     if isinstance(mmsi, int) and mmsi > 0:
         return mmsi
@@ -112,7 +112,7 @@ def _position_fields(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
     # "not available" — skip those to keep the DB clean.
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return None
-    meta = msg.get("Metadata") or {}
+    meta = msg.get("MetaData") or {}
     return {
         "latitude": float(lat),
         "longitude": float(lon),
@@ -144,7 +144,7 @@ def _static_fields(msg: dict[str, Any]) -> Optional[dict[str, Any]]:
             length = a + b
         if c is not None and d is not None:
             width = c + d
-    meta = msg.get("Metadata") or {}
+    meta = msg.get("MetaData") or {}
     return {
         "ship_name": _clean_str(static.get("Name")),
         "call_sign": _clean_str(static.get("CallSign")),
