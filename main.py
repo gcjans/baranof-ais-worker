@@ -70,15 +70,20 @@ async def _run_session(cfg: config.Config) -> None:
     logger.info(
         "Connecting to %s (bbox=%s)", AIS_STREAM_URL, cfg.bbox
     )
-    # Keep DB connection open across the session so we don't re-
-    # authenticate to PG on every message.  Reopen on reconnect so
-    # we recover if PG restarts during a stall.
-    db_conn = ingest.connect(cfg.database_url)
     last_message_at = time.monotonic()
     last_prune_at = time.monotonic()
     counters = {"position": 0, "static": 0, "skipped": 0}
+    # IMPORTANT: open the DB connection INSIDE the try/finally so a
+    # psycopg2.OperationalError (bad DATABASE_URL, unreachable host,
+    # auth failure) surfaces through our logger rather than
+    # escaping up into _main_loop's catch-all.
+    db_conn: "psycopg2.extensions.connection | None" = None
 
     try:
+        # Keep DB connection open across the session so we don't re-
+        # authenticate to PG on every message.  Reopen on reconnect so
+        # we recover if PG restarts during a stall.
+        db_conn = ingest.connect(cfg.database_url)
         # `open_timeout` bounds the handshake; `ping_interval` keeps
         # the TCP path warm so NAT boxes don't time us out.
         async with websockets.connect(
@@ -141,8 +146,9 @@ async def _run_session(cfg: config.Config) -> None:
             type(err).__name__, counters,
         )
     finally:
-        with suppress(psycopg2.Error):
-            db_conn.close()
+        if db_conn is not None:
+            with suppress(psycopg2.Error):
+                db_conn.close()
         elapsed = time.monotonic() - last_message_at
         logger.info(
             "Session ended.  Last message %.0fs ago.  Final counters: %s",
@@ -160,9 +166,14 @@ async def _main_loop(cfg: config.Config, stop: asyncio.Event) -> None:
         session_start = time.monotonic()
         try:
             await _run_session(cfg)
-        except Exception:
-            # _run_session already logs; just continue to backoff.
-            pass
+        except Exception:  # noqa: BLE001 — keep the reconnect loop alive
+            # _run_session logs most failures inside its own try/
+            # except, but anything that escapes (e.g. a bug that
+            # raises BEFORE the try block) used to be swallowed
+            # silently, making "no data" failures invisible in
+            # Railway.  Log with full traceback so the root cause
+            # shows in the log stream.
+            logger.exception("Session crashed unexpectedly — will reconnect")
         if stop.is_set():
             break
         session_duration = time.monotonic() - session_start
