@@ -72,7 +72,15 @@ async def _run_session(cfg: config.Config) -> None:
     )
     last_message_at = time.monotonic()
     last_prune_at = time.monotonic()
+    last_status_at = time.monotonic()
     counters = {"position": 0, "static": 0, "skipped": 0}
+    # Short status cadence so operators can see message throughput
+    # in near-real-time when something looks wrong.  Steady-state
+    # traffic in SE Alaska runs ~hundreds of messages/min even off-
+    # season (ferries, tugs, fishing); zero counters after 60 s
+    # almost certainly means the subscription was rejected or the
+    # bbox / filter is wrong.
+    STATUS_INTERVAL_SEC = 60.0
     # IMPORTANT: open the DB connection INSIDE the try/finally so a
     # psycopg2.OperationalError (bad DATABASE_URL, unreachable host,
     # auth failure) surfaces through our logger rather than
@@ -126,14 +134,17 @@ async def _run_session(cfg: config.Config) -> None:
 
                 # Periodic status + prune.  Cheap enough to inline.
                 now = time.monotonic()
+                if now - last_status_at >= STATUS_INTERVAL_SEC:
+                    logger.info("Status: counters=%s", counters)
+                    last_status_at = now
                 if now - last_prune_at >= cfg.prune_interval_sec:
                     deleted = ingest.prune_history(
                         db_conn, cfg.history_retention_days
                     )
                     last_prune_at = now
                     logger.info(
-                        "Status: counters=%s, pruned=%d history rows",
-                        counters, deleted,
+                        "Prune: deleted %d history rows older than %dd",
+                        deleted, cfg.history_retention_days,
                     )
     except ConnectionClosed as err:
         logger.warning(
