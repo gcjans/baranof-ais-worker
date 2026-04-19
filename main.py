@@ -24,6 +24,7 @@ Runtime model: asyncio single-task event loop.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import signal
@@ -74,6 +75,11 @@ async def _run_session(cfg: config.Config) -> None:
     last_prune_at = time.monotonic()
     last_status_at = time.monotonic()
     counters = {"position": 0, "static": 0, "skipped": 0}
+    # Diagnostic bookkeeping so we can see WHY messages get skipped
+    # instead of just the count.  Cleared implicitly on reconnect
+    # (new session → new locals).
+    skipped_types: collections.Counter[str] = collections.Counter()
+    first_skipped_sample: dict[str, Any] | None = None
     # Short status cadence so operators can see message throughput
     # in near-real-time when something looks wrong.  Steady-state
     # traffic in SE Alaska runs ~hundreds of messages/min even off-
@@ -122,6 +128,7 @@ async def _run_session(cfg: config.Config) -> None:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     counters["skipped"] += 1
+                    skipped_types["<json_error>"] += 1
                     continue
 
                 kind = ingest.handle_message(db_conn, msg)
@@ -129,13 +136,35 @@ async def _run_session(cfg: config.Config) -> None:
                     counters[kind] += 1
                 else:
                     counters["skipped"] += 1
+                    mtype = msg.get("MessageType", "<no-MessageType>")
+                    if not isinstance(mtype, str):
+                        mtype = f"<non-str:{type(mtype).__name__}>"
+                    skipped_types[mtype] += 1
+                    # Dump the first skipped message in full — one-shot,
+                    # so we can see the exact JSON shape aisstream is
+                    # sending us without flooding the log.  Trimmed to
+                    # 1500 chars in case the message is huge.
+                    if first_skipped_sample is None:
+                        first_skipped_sample = msg
+                        try:
+                            dumped = json.dumps(msg, default=str)
+                        except (TypeError, ValueError):
+                            dumped = repr(msg)
+                        logger.info(
+                            "SAMPLE skipped message (first only): %s",
+                            dumped[:1500],
+                        )
 
                 last_message_at = time.monotonic()
 
                 # Periodic status + prune.  Cheap enough to inline.
                 now = time.monotonic()
                 if now - last_status_at >= STATUS_INTERVAL_SEC:
-                    logger.info("Status: counters=%s", counters)
+                    top_skipped = dict(skipped_types.most_common(5))
+                    logger.info(
+                        "Status: counters=%s, top_skipped_types=%s",
+                        counters, top_skipped,
+                    )
                     last_status_at = now
                 if now - last_prune_at >= cfg.prune_interval_sec:
                     deleted = ingest.prune_history(
